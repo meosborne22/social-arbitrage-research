@@ -8,10 +8,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
 YOUTUBE_API_KEY = os.environ["YOUTUBE_API_KEY"]
 
-supabase = create_client(
-    SUPABASE_URL,
-    SUPABASE_SECRET_KEY,
-)
+supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
 youtube = build(
     "youtube",
@@ -31,6 +28,7 @@ SEARCH_TERMS = [
 def collect_youtube_results():
     collected_at = datetime.now(timezone.utc).isoformat()
     total_saved = 0
+    total_skipped = 0
 
     for term in SEARCH_TERMS:
         print(f"Searching YouTube for: {term}")
@@ -49,14 +47,12 @@ def collect_youtube_results():
 
         for item in response.get("items", []):
             video_id = item.get("id", {}).get("videoId")
-
             if video_id:
                 video_ids.append(video_id)
 
         if not video_ids:
             continue
 
-        # Get statistics for all videos returned by this search.
         stats_response = youtube.videos().list(
             part="snippet,statistics",
             id=",".join(video_ids),
@@ -69,8 +65,25 @@ def collect_youtube_results():
 
         for item in response.get("items", []):
             video_id = item.get("id", {}).get("videoId")
-
             if not video_id:
+                continue
+
+            # Prevent duplicate observations for the same YouTube video.
+            existing = (
+                supabase.table("observations")
+                .select("id")
+                .eq("source", "youtube")
+                .eq(
+                    "source_url",
+                    f"https://www.youtube.com/watch?v={video_id}",
+                )
+                .limit(1)
+                .execute()
+            )
+
+            if existing.data:
+                total_skipped += 1
+                print(f"Skipped existing video: {video_id}")
                 continue
 
             snippet = item.get("snippet", {})
@@ -81,10 +94,12 @@ def collect_youtube_results():
             like_count = int(statistics.get("likeCount", 0))
             comment_count = int(statistics.get("commentCount", 0))
 
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+
             observation = {
                 "observed_at": collected_at,
                 "source": "youtube",
-                "source_url": f"https://www.youtube.com/watch?v={video_id}",
+                "source_url": video_url,
                 "entity": snippet.get("channelTitle"),
                 "observation_type": "youtube_video",
                 "metric": "video_engagement",
@@ -101,7 +116,7 @@ def collect_youtube_results():
                     "view_count": view_count,
                     "like_count": like_count,
                     "comment_count": comment_count,
-                    "video_url": f"https://www.youtube.com/watch?v={video_id}",
+                    "video_url": video_url,
                 },
             }
 
@@ -126,7 +141,8 @@ def collect_youtube_results():
 
     print(
         f"YouTube collection complete. "
-        f"Saved {total_saved} observations."
+        f"Saved {total_saved} new observations; "
+        f"skipped {total_skipped} duplicates."
     )
 
 
