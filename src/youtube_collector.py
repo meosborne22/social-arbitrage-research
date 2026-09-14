@@ -4,40 +4,20 @@ from datetime import datetime, timezone
 from googleapiclient.discovery import build
 from supabase import create_client
 
-
-# -----------------------------
-# Environment variables
-# -----------------------------
-
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
 YOUTUBE_API_KEY = os.environ["YOUTUBE_API_KEY"]
-
-
-# -----------------------------
-# Connect to Supabase
-# -----------------------------
 
 supabase = create_client(
     SUPABASE_URL,
     SUPABASE_SECRET_KEY,
 )
 
-
-# -----------------------------
-# Connect to YouTube
-# -----------------------------
-
 youtube = build(
     "youtube",
     "v3",
     developerKey=YOUTUBE_API_KEY,
 )
-
-
-# -----------------------------
-# Initial search terms
-# -----------------------------
 
 SEARCH_TERMS = [
     "viral products",
@@ -48,18 +28,11 @@ SEARCH_TERMS = [
 ]
 
 
-# -----------------------------
-# Collect YouTube results
-# -----------------------------
-
 def collect_youtube_results():
-
     collected_at = datetime.now(timezone.utc).isoformat()
-
     total_saved = 0
 
     for term in SEARCH_TERMS:
-
         print(f"Searching YouTube for: {term}")
 
         response = youtube.search().list(
@@ -72,27 +45,52 @@ def collect_youtube_results():
             relevanceLanguage="en",
         ).execute()
 
-        for item in response.get("items", []):
+        video_ids = []
 
+        for item in response.get("items", []):
+            video_id = item.get("id", {}).get("videoId")
+
+            if video_id:
+                video_ids.append(video_id)
+
+        if not video_ids:
+            continue
+
+        # Get statistics for all videos returned by this search.
+        stats_response = youtube.videos().list(
+            part="snippet,statistics",
+            id=",".join(video_ids),
+        ).execute()
+
+        stats_by_id = {
+            item["id"]: item
+            for item in stats_response.get("items", [])
+        }
+
+        for item in response.get("items", []):
             video_id = item.get("id", {}).get("videoId")
 
             if not video_id:
                 continue
 
             snippet = item.get("snippet", {})
+            video_data = stats_by_id.get(video_id, {})
+            statistics = video_data.get("statistics", {})
+
+            view_count = int(statistics.get("viewCount", 0))
+            like_count = int(statistics.get("likeCount", 0))
+            comment_count = int(statistics.get("commentCount", 0))
 
             observation = {
                 "observed_at": collected_at,
                 "source": "youtube",
-                "source_url": (
-                    f"https://www.youtube.com/watch?v={video_id}"
-                ),
+                "source_url": f"https://www.youtube.com/watch?v={video_id}",
                 "entity": snippet.get("channelTitle"),
-                "observation_type": "youtube_search_result",
-                "metric": "search_result",
-                "value": 1,
+                "observation_type": "youtube_video",
+                "metric": "video_engagement",
+                "value": view_count,
                 "text_evidence": snippet.get("title", ""),
-                "reliability": 0.70,
+                "reliability": 0.80,
                 "raw_metadata": {
                     "video_id": video_id,
                     "search_term": term,
@@ -100,22 +98,28 @@ def collect_youtube_results():
                     "channel_id": snippet.get("channelId"),
                     "published_at": snippet.get("publishedAt"),
                     "description": snippet.get("description"),
-                    "video_url": (
-                        f"https://www.youtube.com/watch?v={video_id}"
-                    ),
+                    "view_count": view_count,
+                    "like_count": like_count,
+                    "comment_count": comment_count,
+                    "video_url": f"https://www.youtube.com/watch?v={video_id}",
                 },
             }
 
             try:
-
                 supabase.table("observations").insert(
                     observation
                 ).execute()
 
                 total_saved += 1
 
-            except Exception as error:
+                print(
+                    f"Saved: {snippet.get('title', '')} | "
+                    f"Views: {view_count:,} | "
+                    f"Likes: {like_count:,} | "
+                    f"Comments: {comment_count:,}"
+                )
 
+            except Exception as error:
                 print(
                     f"Could not save video {video_id}: {error}"
                 )
@@ -125,10 +129,6 @@ def collect_youtube_results():
         f"Saved {total_saved} observations."
     )
 
-
-# -----------------------------
-# Start collector
-# -----------------------------
 
 if __name__ == "__main__":
     collect_youtube_results()
