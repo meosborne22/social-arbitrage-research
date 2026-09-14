@@ -1,0 +1,77 @@
+{
+  "type": "object",
+  "required": [
+    "thesis_id",
+    "as_of",
+    "trend",
+    "company",
+    "ticker",
+    "level",
+    "score",
+    "evidence",
+    "contradictions",
+    "catalyst",
+    "invalidation",
+    "bear_case"
+  ],
+  "properties": {
+    "thesis_id": {
+      "type": "string"
+    },
+    "as_of": {
+      "type": "string"
+    },
+    "trend": {
+      "type": "object",
+      "required": [
+        "what_consumers_are_doing",
+        "first_detected"
+      ],
+      "properties": {
+        "what_consumers_are_doing": {
+          "type": "string"
+        },
+        "first_detected": {
+          "type": "string"
+        }
+      }
+    },
+    "company": {
+      "type": "string"
+    },
+    "ticker": {
+      "type": "string"
+    },
+    "level": {
+      "enum": [
+        "1",
+        "2",
+        "3",
+        "4"
+      ]
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "evidence": {
+      "type": "array"
+    },
+    "contradictions": {
+      "type": "array"
+    },
+    "catalyst": {
+      "type": "string"
+    },
+    "invalidation": {
+      "type": "string"
+    },
+    "bear_case": {
+      "type": "string"
+    },
+    "would_consider_buying": {
+      "type": "boolean"
+    }
+  }
+}

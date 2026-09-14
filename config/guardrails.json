@@ -1,0 +1,19 @@
+{
+  "max_position_pct": 10,
+  "reference_portfolio_usd_low": 20000,
+  "reference_portfolio_usd_high": 25000,
+  "microcap_requirements": {
+    "minimum_liquidity_check": true,
+    "spread_check": true,
+    "dilution_check": true,
+    "convertible_check": true,
+    "cash_runway_check": true,
+    "going_concern_check": true,
+    "reverse_split_check": true,
+    "insider_activity_check": true,
+    "related_party_check": true,
+    "auditor_check": true,
+    "otc_promotion_check": true
+  },
+  "auto_trade": false
+}

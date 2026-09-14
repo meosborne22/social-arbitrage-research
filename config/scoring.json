@@ -1,0 +1,25 @@
+{
+  "weights": {
+    "social_acceleration": 15,
+    "cross_platform_confirmation": 10,
+    "search_acceleration": 10,
+    "purchase_adoption_evidence": 15,
+    "brand_switching_behavior": 10,
+    "company_exposure": 10,
+    "earnings_impact": 10,
+    "market_awareness_inverse": 5,
+    "valuation_mispricing": 10,
+    "catalyst_timing": 5
+  },
+  "thresholds": {
+    "exceptional": 90,
+    "high_conviction": 80,
+    "developing": 70
+  },
+  "penalties": {
+    "weak_evidence": 0,
+    "contradictory_evidence": -5,
+    "material_contradiction": -10,
+    "thesis_invalidated": -100
+  }
+}
