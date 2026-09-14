@@ -1,4 +1,3 @@
-```python
 import os
 import re
 from collections import Counter
@@ -152,4 +151,3 @@ def detect_trends():
 
 if __name__ == "__main__":
     detect_trends()
-```
