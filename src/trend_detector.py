@@ -1,6 +1,6 @@
 import os
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 
 from supabase import create_client
@@ -10,28 +10,29 @@ SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
+# Generic words that do not represent a useful consumer trend by themselves.
 STOP_WORDS = {
-    "the", "and", "for", "with", "this", "that", "from",
-    "your", "you", "are", "was", "were", "have", "has",
-    "just", "about", "into", "their", "they", "them",
-    "product", "products", "viral", "trending", "trend",
-    "shorts", "short", "youtube", "video", "videos",
-    "usa", "right", "now", "new", "best", "top",
-    "everyone", "buying", "bought", "tested", "test",
-    "buy", "can", "but", "made", "going", "every",
-    "like", "really", "things", "thing", "know",
-    "get", "got", "one", "two", "all", "our",
-    "out", "its", "day", "days",
-    "tiktok", "ytshorts", "fyp", "shortvideo",
+    "the", "and", "for", "with", "this", "that", "from", "your", "you",
+    "are", "was", "were", "have", "has", "had", "just", "about", "into",
+    "their", "they", "them", "our", "out", "its", "now", "new", "best",
+    "top", "every", "all", "one", "two", "three", "thing", "things",
+    "stuff", "really", "very", "more", "most", "much", "many", "like",
+    "know", "going", "got", "get", "can", "could", "would", "should",
+    "made", "make", "making", "buy", "buying", "bought", "want", "wanted",
+    "need", "needed", "test", "tested", "testing", "review", "reviews",
+    "video", "videos", "short", "shorts", "youtube", "ytshorts", "fyp",
+    "viral", "trending", "trend", "trends", "usa", "right", "day", "days",
+    "live", "business", "consumer", "changed", "change", "unsolved",
+    "find", "finds", "amazon", "product", "products",
 }
 
+# Terms that are especially useful as early consumer-behavior clues.
 PRIORITY_WORDS = {
-    "makeup", "beauty", "skincare", "fashion", "jewelry",
-    "kitchen", "home", "fitness", "food", "drink", "coffee",
-    "snacks", "chocolate", "shoes", "clothing", "electronics",
-    "phone", "gaming", "pet", "baby", "travel", "amazon",
-    "meesho", "nestle", "takis", "milkshake", "football",
-    "winter",
+    "makeup", "beauty", "skincare", "fashion", "jewelry", "kitchen", "home",
+    "fitness", "food", "drink", "coffee", "snacks", "chocolate", "shoes",
+    "clothing", "electronics", "phone", "gaming", "pet", "baby", "travel",
+    "nestle", "takis", "milkshake", "football", "winter", "amazonfinds",
+    "meesho",
 }
 
 def extract_keywords(text):
@@ -52,15 +53,15 @@ def detect_trends():
     )
 
     observations = response.data or []
-
     print(f"Found {len(observations)} recent YouTube observations.")
 
     if not observations:
         print("No observations available yet.")
         return
 
+    # Count a keyword once per video, not multiple times within one title.
     keyword_counts = Counter()
-    keyword_observations = {}
+    keyword_observations = defaultdict(list)
 
     for observation in observations:
         title = observation.get("text_evidence") or ""
@@ -68,10 +69,9 @@ def detect_trends():
 
         for keyword in keywords:
             keyword_counts[keyword] += 1
-            if keyword not in keyword_observations:
-                keyword_observations[keyword] = []
             keyword_observations[keyword].append(observation)
 
+    # Require repeated appearances before creating a trend.
     candidates = [
         (keyword, count)
         for keyword, count in keyword_counts.items()
@@ -79,7 +79,10 @@ def detect_trends():
     ]
 
     candidates.sort(
-        key=lambda item: (item[0] in PRIORITY_WORDS, item[1]),
+        key=lambda item: (
+            item[0] in PRIORITY_WORDS,
+            item[1],
+        ),
         reverse=True,
     )
 
@@ -89,7 +92,6 @@ def detect_trends():
 
     for keyword, count in candidates[:20]:
         related = keyword_observations[keyword]
-
         first_seen = min(item["observed_at"] for item in related)
         trend_name = f"YouTube: {keyword}"
 
@@ -103,7 +105,6 @@ def detect_trends():
 
         if existing.data:
             trend_id = existing.data[0]["id"]
-
             (
                 supabase.table("trends")
                 .update({"status": "active"})
@@ -111,13 +112,11 @@ def detect_trends():
                 .execute()
             )
         else:
-            supabase.table("trends").insert(
-                {
-                    "name": trend_name,
-                    "first_detected_at": first_seen,
-                    "status": "active",
-                }
-            ).execute()
+            supabase.table("trends").insert({
+                "name": trend_name,
+                "first_detected_at": first_seen,
+                "status": "active",
+            }).execute()
 
         created_or_updated += 1
         print(f"- {trend_name}: {count} observations")
