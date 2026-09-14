@@ -13,8 +13,6 @@ SUPABASE_URL,
 SUPABASE_SECRET_KEY,
 )
 
-# Words that are too generic to represent a useful consumer trend.
-
 STOP_WORDS = {
 "the", "and", "for", "with", "this", "that", "from",
 "your", "you", "are", "was", "were", "have", "has",
@@ -26,11 +24,9 @@ STOP_WORDS = {
 "buy", "can", "but", "made", "going", "every",
 "like", "really", "things", "thing", "know",
 "get", "got", "one", "two", "all", "our",
-"out", "its", "just", "day", "days",
+"out", "its", "day", "days",
 "tiktok", "ytshorts", "fyp", "shortvideo",
 }
-
-# Words that are especially useful when they appear in consumer/product content.
 
 PRIORITY_WORDS = {
 "makeup",
@@ -41,13 +37,11 @@ PRIORITY_WORDS = {
 "kitchen",
 "home",
 "fitness",
-"supplements",
 "food",
 "drink",
 "coffee",
 "snacks",
 "chocolate",
-"fashion",
 "shoes",
 "clothing",
 "electronics",
@@ -66,29 +60,23 @@ PRIORITY_WORDS = {
 }
 
 def extract_keywords(text):
-"""Extract meaningful words from a YouTube title."""
-
-```
 words = re.findall(
-    r"[a-zA-Z][a-zA-Z0-9'-]{2,}",
-    text.lower()
+r"[a-zA-Z][a-zA-Z0-9'-]{2,}",
+text.lower()
 )
 
-useful_words = [
+```
+return [
     word
     for word in words
     if word not in STOP_WORDS
 ]
-
-return useful_words
 ```
 
 def detect_trends():
-"""Find recurring consumer/product themes in recent YouTube data."""
-
-```
 cutoff = datetime.now(timezone.utc) - timedelta(days=7)
 
+```
 response = (
     supabase
     .table("observations")
@@ -102,49 +90,39 @@ response = (
 
 observations = response.data or []
 
-print(
-    f"Found {len(observations)} recent "
-    f"YouTube observations."
-)
+print(f"Found {len(observations)} recent YouTube observations.")
 
 if not observations:
     print("No observations available yet.")
     return
 
 keyword_counts = Counter()
-keyword_videos = {}
+keyword_observations = {}
 
 for observation in observations:
     title = observation.get("text_evidence") or ""
-
-    keywords = set(
-        extract_keywords(title)
-    )
+    keywords = set(extract_keywords(title))
 
     for keyword in keywords:
         keyword_counts[keyword] += 1
 
-        if keyword not in keyword_videos:
-            keyword_videos[keyword] = []
+        if keyword not in keyword_observations:
+            keyword_observations[keyword] = []
 
-        keyword_videos[keyword].append(
-            observation
-        )
+        keyword_observations[keyword].append(observation)
 
-# Only keep themes that appear more than once.
 candidates = [
     (keyword, count)
     for keyword, count in keyword_counts.items()
     if count >= 2
 ]
 
-# Give useful consumer/product words a small priority boost.
 candidates.sort(
     key=lambda item: (
         item[0] in PRIORITY_WORDS,
         item[1]
     ),
-    reverse=True,
+    reverse=True
 )
 
 print("\nDetected meaningful recurring themes:")
@@ -152,8 +130,7 @@ print("\nDetected meaningful recurring themes:")
 created_or_updated = 0
 
 for keyword, count in candidates[:20]:
-
-    related = keyword_videos[keyword]
+    related = keyword_observations[keyword]
 
     first_seen = min(
         item["observed_at"]
@@ -177,11 +154,7 @@ for keyword, count in candidates[:20]:
         (
             supabase
             .table("trends")
-            .update(
-                {
-                    "status": "active",
-                }
-            )
+            .update({"status": "active"})
             .eq("id", trend_id)
             .execute()
         )
@@ -190,17 +163,13 @@ for keyword, count in candidates[:20]:
         result = (
             supabase
             .table("trends")
-            .insert(
-                {
-                    "name": trend_name,
-                    "first_detected_at": first_seen,
-                    "status": "active",
-                }
-            )
+            .insert({
+                "name": trend_name,
+                "first_detected_at": first_seen,
+                "status": "active",
+            })
             .execute()
         )
-
-        trend_id = result.data[0]["id"]
 
     created_or_updated += 1
 
@@ -211,8 +180,7 @@ for keyword, count in candidates[:20]:
 
 print(
     f"\nTrend detection complete. "
-    f"Created/updated "
-    f"{created_or_updated} trends."
+    f"Created/updated {created_or_updated} trends."
 )
 ```
 
