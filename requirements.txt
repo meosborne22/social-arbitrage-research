@@ -1,3 +1,1 @@
-# MVP intentionally keeps dependencies minimal.
-# Production collectors/LLM/database clients will be added after
-# source permissions and infrastructure accounts are configured.
+supabase
