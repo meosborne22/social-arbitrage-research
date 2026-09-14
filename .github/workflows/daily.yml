@@ -1,0 +1,42 @@
+name: Social Arbitrage Daily Test
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 11 * * 1-5"
+
+jobs:
+  connection-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Test Supabase connection
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          from supabase import create_client
+
+          url = os.environ["SUPABASE_URL"]
+          key = os.environ["SUPABASE_SECRET_KEY"]
+
+          supabase = create_client(url, key)
+
+          result = supabase.table("companies").select("id").limit(1).execute()
+
+          print("SUCCESS: GitHub Actions connected to Supabase.")
+          print("Supabase returned:", result.data)
+          PY
