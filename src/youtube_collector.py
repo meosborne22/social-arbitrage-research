@@ -38,8 +38,6 @@ youtube = build(
 # -----------------------------
 # Initial search terms
 # -----------------------------
-# Keep this list small while we test.
-# Each term uses one YouTube search.list call.
 
 SEARCH_TERMS = [
     "viral products",
@@ -84,11 +82,19 @@ def collect_youtube_results():
             snippet = item.get("snippet", {})
 
             observation = {
-                "source": "youtube",
-                "source_id": video_id,
                 "observed_at": collected_at,
-                "raw_text": snippet.get("title", ""),
-                "metadata": {
+                "source": "youtube",
+                "source_url": (
+                    f"https://www.youtube.com/watch?v={video_id}"
+                ),
+                "entity": snippet.get("channelTitle"),
+                "observation_type": "youtube_search_result",
+                "metric": "search_result",
+                "value": 1,
+                "text_evidence": snippet.get("title", ""),
+                "reliability": 0.70,
+                "raw_metadata": {
+                    "video_id": video_id,
                     "search_term": term,
                     "channel_title": snippet.get("channelTitle"),
                     "channel_id": snippet.get("channelId"),
