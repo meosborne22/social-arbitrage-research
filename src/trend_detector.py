@@ -21,21 +21,76 @@ STOP_WORDS = {
     "business","consumer","changed","actually","finds","live","regret",
     "unsolved","flawless","holiday","comment","everything","fall","life",
     "link","love","needs","obsessed","penny","quot","single","stop","store",
-    "tips","under","useful","what","worth","amp","crude","poisoning",
-    "everyone","musthave",
+    "tips","under","useful","what","worth","amp","crude","poisoning","did",
+    "mystery","luxury","outfit","skin",
 }
 
+# These are useful consumer categories or brands. They are allowed
+# to become themes even when they are not rapidly accelerating yet.
 PRIORITY_WORDS = {
-    "makeup","beauty","skincare","fashion","jewelry","kitchen","home",
-    "fitness","food","drink","coffee","snacks","chocolate","shoes","clothing",
-    "electronics","phone","gaming","pet","baby","travel","amazon","amazonfinds",
-    "meesho","nestle","takis","milkshake","football","winter",
-    "tarte","skincareroutine","tiktokmademebuy",
+    "amazon","amazonfinds","beauty","makeup","skincare","skincareroutine",
+    "skincaretips","fashion","jewelry","kitchen","home","fitness","food",
+    "drink","coffee","snacks","chocolate","shoes","clothing","electronics",
+    "phone","gaming","pet","baby","travel","meesho","nestle","takis",
+    "milkshake","football","winter","tarte","cleaninghacks",
+    "holidayshopping","tiktokmademebuy","amzonmustbuy",
 }
+
+# Phrase signals are stronger than isolated words because they describe
+# consumer behavior rather than generic vocabulary.
+PHRASE_SIGNALS = {
+    "tiktok made me buy": "TikTok purchase influence",
+    "made me buy it": "social purchase influence",
+    "must buy": "purchase intent",
+    "worth the hype": "purchase validation",
+    "everyone's raving": "word of mouth",
+    "everyone is buying": "broad purchase intent",
+    "selling products": "sales signal",
+    "viral product": "product virality",
+    "amazon finds": "Amazon discovery",
+    "amazon haul": "Amazon shopping behavior",
+    "amazon gadgets": "Amazon gadget demand",
+}
+
+def clean_text(text):
+    return re.sub(r"\s+", " ", (text or "").lower()).strip()
 
 def extract_keywords(text):
-    words = re.findall(r"[a-zA-Z][a-zA-Z0-9'-]{2,}", text.lower())
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9'-]{2,}", clean_text(text))
     return [word for word in words if word not in STOP_WORDS]
+
+def extract_phrases(text):
+    normalized = clean_text(text)
+    return [phrase for phrase in PHRASE_SIGNALS if phrase in normalized]
+
+def upsert_trend(name, related_observations):
+    existing = (
+        supabase.table("trends")
+        .select("id")
+        .eq("name", name)
+        .limit(1)
+        .execute()
+    )
+
+    first_seen = min(item["observed_at"] for item in related_observations)
+
+    if existing.data:
+        trend_id = existing.data[0]["id"]
+        (
+            supabase.table("trends")
+            .update({
+                "status": "active",
+                "first_detected_at": first_seen,
+            })
+            .eq("id", trend_id)
+            .execute()
+        )
+    else:
+        supabase.table("trends").insert({
+            "name": name,
+            "first_detected_at": first_seen,
+            "status": "active",
+        }).execute()
 
 def detect_trends():
     cutoff = datetime.now(timezone.utc) - timedelta(days=14)
@@ -59,67 +114,84 @@ def detect_trends():
 
     daily_counts = defaultdict(Counter)
     keyword_observations = defaultdict(list)
+    phrase_counts = Counter()
+    phrase_observations = defaultdict(list)
 
     for observation in observations:
         title = observation.get("text_evidence") or ""
-        keywords = set(extract_keywords(title))
         day = observation["observed_at"][:10]
 
-        for keyword in keywords:
+        for keyword in set(extract_keywords(title)):
             daily_counts[keyword][day] += 1
             keyword_observations[keyword].append(observation)
 
-    candidates = []
+        for phrase in extract_phrases(title):
+            phrase_counts[phrase] += 1
+            phrase_observations[phrase].append(observation)
 
-    for keyword, counts in daily_counts.items():
+    selected = []
+
+    # 1. Meaningful consumer categories/brands.
+    for keyword in PRIORITY_WORDS:
+        counts = daily_counts.get(keyword, Counter())
         total = sum(counts.values())
-        active_days = len(counts)
+        if total >= 2:
+            selected.append({
+                "name": f"YouTube: {keyword}",
+                "kind": "category",
+                "total": total,
+                "related": keyword_observations[keyword],
+            })
 
-        if total < 3 or active_days < 2:
+    # 2. Strong behavior phrases.
+    for phrase, total in phrase_counts.items():
+        if total >= 2:
+            selected.append({
+                "name": f"YouTube behavior: {PHRASE_SIGNALS[phrase]}",
+                "kind": "behavior",
+                "total": total,
+                "related": phrase_observations[phrase],
+            })
+
+    # 3. Unknown words are admitted only if they are both repeated
+    # and accelerating. This prevents generic words like "did" from
+    # becoming themes simply because they appeared a few times.
+    for keyword, counts in daily_counts.items():
+        if keyword in PRIORITY_WORDS:
             continue
 
-        recent_days = sorted(counts.keys())[-3:]
-        older_days = sorted(counts.keys())[:-3]
+        total = sum(counts.values())
+        days = sorted(counts.keys())
+
+        if total < 4 or len(days) < 3:
+            continue
+
+        recent_days = days[-3:]
+        older_days = days[:-3]
         recent_total = sum(counts[d] for d in recent_days)
         older_total = sum(counts[d] for d in older_days)
 
-        if older_total > 0:
-            recent_avg = recent_total / len(recent_days)
-            older_avg = older_total / len(older_days)
-            growth_ratio = recent_avg / older_avg
-        else:
-            growth_ratio = 2.0 if recent_total >= 2 else 1.0
+        if older_total <= 0:
+            continue
 
-        # Keep known consumer categories/brands, plus only
-        # genuinely accelerating unknown terms.
-        is_priority = keyword in PRIORITY_WORDS
-        is_accelerating = growth_ratio >= 1.25 and recent_total >= 3
+        recent_avg = recent_total / len(recent_days)
+        older_avg = older_total / len(older_days)
+        growth_ratio = recent_avg / older_avg
 
-        if is_priority or is_accelerating:
-            candidates.append({
-                "keyword": keyword,
+        if growth_ratio >= 1.75 and recent_total >= 4:
+            selected.append({
+                "name": f"YouTube emerging: {keyword}",
+                "kind": "accelerating",
                 "total": total,
-                "active_days": active_days,
-                "recent_total": recent_total,
+                "related": keyword_observations[keyword],
                 "growth_ratio": growth_ratio,
-                "priority": is_priority,
             })
 
-    candidates.sort(
-        key=lambda item: (
-            item["priority"],
-            item["growth_ratio"],
-            item["recent_total"],
-            item["active_days"],
-        ),
-        reverse=True,
-    )
-
-    # First mark existing YouTube trends inactive.
+    # Deactivate all existing YouTube themes first.
     existing = (
         supabase.table("trends")
         .select("id,name")
-        .like("name", "YouTube: %")
+        .like("name", "YouTube%")
         .execute()
     )
 
@@ -131,51 +203,27 @@ def detect_trends():
             .execute()
         )
 
-    print("\nCurrent consumer themes:")
+    # Remove duplicate selections by name.
+    unique = {}
+    for item in selected:
+        unique[item["name"]] = item
 
-    activated = 0
+    print("\nSelected consumer signals:")
 
-    for item in candidates[:25]:
-        keyword = item["keyword"]
-        trend_name = f"YouTube: {keyword}"
-
+    for item in sorted(
+        unique.values(),
+        key=lambda x: (x["kind"], -x["total"], x["name"])
+    )[:40]:
         print(
-            f"- {trend_name}: recent={item['recent_total']}, "
-            f"total={item['total']}, active_days={item['active_days']}, "
-            f"growth_ratio={item['growth_ratio']:.2f}x"
+            f"- {item['name']} | "
+            f"type={item['kind']} | "
+            f"observations={item['total']}"
         )
-
-        existing = (
-            supabase.table("trends")
-            .select("id")
-            .eq("name", trend_name)
-            .limit(1)
-            .execute()
-        )
-
-        if existing.data:
-            trend_id = existing.data[0]["id"]
-            (
-                supabase.table("trends")
-                .update({"status": "active"})
-                .eq("id", trend_id)
-                .execute()
-            )
-        else:
-            related = keyword_observations[keyword]
-            first_seen = min(item["observed_at"] for item in related)
-
-            supabase.table("trends").insert({
-                "name": trend_name,
-                "first_detected_at": first_seen,
-                "status": "active",
-            }).execute()
-
-        activated += 1
+        upsert_trend(item["name"], item["related"])
 
     print(
         f"\nTrend detection complete. "
-        f"Activated {activated} current themes."
+        f"Activated {min(len(unique), 40)} consumer signals."
     )
 
 if __name__ == "__main__":
