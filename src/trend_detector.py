@@ -25,8 +25,6 @@ STOP_WORDS = {
     "mystery","luxury","outfit","skin",
 }
 
-# These are useful consumer categories or brands. They are allowed
-# to become themes even when they are not rapidly accelerating yet.
 PRIORITY_WORDS = {
     "amazon","amazonfinds","beauty","makeup","skincare","skincareroutine",
     "skincaretips","fashion","jewelry","kitchen","home","fitness","food",
@@ -36,8 +34,6 @@ PRIORITY_WORDS = {
     "holidayshopping","tiktokmademebuy","amzonmustbuy",
 }
 
-# Phrase signals are stronger than isolated words because they describe
-# consumer behavior rather than generic vocabulary.
 PHRASE_SIGNALS = {
     "tiktok made me buy": "TikTok purchase influence",
     "made me buy it": "social purchase influence",
@@ -62,6 +58,25 @@ def extract_keywords(text):
 def extract_phrases(text):
     normalized = clean_text(text)
     return [phrase for phrase in PHRASE_SIGNALS if phrase in normalized]
+
+def video_id_from_observation(observation):
+    metadata = observation.get("raw_metadata") or {}
+    video_id = metadata.get("video_id")
+    if video_id:
+        return video_id
+
+    url = observation.get("source_url") or ""
+    match = re.search(r"[?&]v=([^&]+)", url)
+    return match.group(1) if match else url
+
+def unique_observations(observations):
+    """Keep one row per video for volume/breadth calculations."""
+    seen = {}
+    for observation in observations:
+        video_id = video_id_from_observation(observation)
+        if video_id not in seen:
+            seen[video_id] = observation
+    return list(seen.values())
 
 def upsert_trend(name, related_observations):
     existing = (
@@ -112,12 +127,21 @@ def detect_trends():
         print("No observations available yet.")
         return
 
+    # IMPORTANT:
+    # Repeated snapshots of the same video are useful for engagement growth,
+    # but they must NOT count as multiple independent mentions.
+    volume_observations = unique_observations(observations)
+    print(
+        f"Using {len(volume_observations)} unique YouTube videos "
+        f"for trend-volume calculations."
+    )
+
     daily_counts = defaultdict(Counter)
     keyword_observations = defaultdict(list)
     phrase_counts = Counter()
     phrase_observations = defaultdict(list)
 
-    for observation in observations:
+    for observation in volume_observations:
         title = observation.get("text_evidence") or ""
         day = observation["observed_at"][:10]
 
@@ -131,7 +155,6 @@ def detect_trends():
 
     selected = []
 
-    # 1. Meaningful consumer categories/brands.
     for keyword in PRIORITY_WORDS:
         counts = daily_counts.get(keyword, Counter())
         total = sum(counts.values())
@@ -143,7 +166,6 @@ def detect_trends():
                 "related": keyword_observations[keyword],
             })
 
-    # 2. Strong behavior phrases.
     for phrase, total in phrase_counts.items():
         if total >= 2:
             selected.append({
@@ -153,9 +175,6 @@ def detect_trends():
                 "related": phrase_observations[phrase],
             })
 
-    # 3. Unknown words are admitted only if they are both repeated
-    # and accelerating. This prevents generic words like "did" from
-    # becoming themes simply because they appeared a few times.
     for keyword, counts in daily_counts.items():
         if keyword in PRIORITY_WORDS:
             continue
@@ -187,7 +206,6 @@ def detect_trends():
                 "growth_ratio": growth_ratio,
             })
 
-    # Deactivate all existing YouTube themes first.
     existing = (
         supabase.table("trends")
         .select("id,name")
@@ -203,7 +221,6 @@ def detect_trends():
             .execute()
         )
 
-    # Remove duplicate selections by name.
     unique = {}
     for item in selected:
         unique[item["name"]] = item
@@ -217,7 +234,7 @@ def detect_trends():
         print(
             f"- {item['name']} | "
             f"type={item['kind']} | "
-            f"observations={item['total']}"
+            f"unique_videos={item['total']}"
         )
         upsert_trend(item["name"], item["related"])
 
