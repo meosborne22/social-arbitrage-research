@@ -25,7 +25,12 @@ CONTEXT_TERMS = [
     "kitchen", "beauty", "fashion", "cleaning", "bundle", "holiday",
 ]
 
-# These terms indicate rejection, avoidance, dissatisfaction, or a boycott.
+# Evidence hierarchy:
+# negative  = rejection, avoidance, boycott, dissatisfaction
+# adoption  = actual buying, use, switching, recommendation, demand
+# interest  = discovery, review, unboxing, product curiosity
+# neutral   = simple mention, announcement, availability, or display
+
 NEGATIVE_PATTERNS = [
     r"\bboycott\b",
     r"\bavoid\b",
@@ -51,9 +56,7 @@ NEGATIVE_PATTERNS = [
     r"\bdisappointing\b",
 ]
 
-# These terms count only when they describe actual consumer behavior,
-# demand, preference, recommendation, or adoption.
-POSITIVE_PATTERNS = [
+ADOPTION_PATTERNS = [
     r"\bbuying\b",
     r"\bbought\b",
     r"\bbuy\b",
@@ -70,7 +73,6 @@ POSITIVE_PATTERNS = [
     r"\beveryone is buying\b",
     r"\bselling out\b",
     r"\bsold out\b",
-    r"\bpopular\b",
     r"\brecommend\b",
     r"\brecommended\b",
     r"\bworth it\b",
@@ -81,27 +83,56 @@ POSITIVE_PATTERNS = [
     r"\bcustomers\b",
 ]
 
+INTEREST_PATTERNS = [
+    r"\breview\b",
+    r"\breviews\b",
+    r"\bunboxing\b",
+    r"\bunbox\b",
+    r"\bfinds?\b",
+    r"\bhaul\b",
+    r"\btry(?:ing)?\b",
+    r"\btested\b",
+    r"\btesting\b",
+    r"\bfirst look\b",
+    r"\blook at\b",
+    r"\bnew product\b",
+    r"\bnew products\b",
+    r"\bproduct discovery\b",
+    r"\bviral product\b",
+    r"\bviral products\b",
+    r"\btrending product\b",
+    r"\btrending products\b",
+    r"\bmust see\b",
+]
+
 def matches_any(text, patterns):
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
 def classify_direction(title):
     """
-    Direction rules:
-      positive = actual buying/adoption/preference/switching/demand evidence
-      negative = boycott/rejection/stopping/complaints/avoidance
-      neutral  = mention/display/review without behavior evidence
-      mixed    = genuinely contains both positive and negative evidence
+    Return one evidence state:
+      negative = rejection/avoidance/dissatisfaction
+      adoption = actual buying/use/switching/preference/demand
+      interest = discovery/review/unboxing/product curiosity
+      neutral  = simple mention/announcement/display
+
+    Negative takes priority over adoption. Adoption takes priority over
+    interest because direct behavior is stronger evidence than curiosity.
     """
     text = title.lower()
-    negative = matches_any(text, NEGATIVE_PATTERNS)
-    positive = matches_any(text, POSITIVE_PATTERNS)
 
-    if positive and negative:
+    negative = matches_any(text, NEGATIVE_PATTERNS)
+    adoption = matches_any(text, ADOPTION_PATTERNS)
+    interest = matches_any(text, INTEREST_PATTERNS)
+
+    if negative and (adoption or interest):
         return "mixed"
     if negative:
         return "negative"
-    if positive:
-        return "positive"
+    if adoption:
+        return "adoption"
+    if interest:
+        return "interest"
     return "neutral"
 
 def extract_entities():
@@ -157,8 +188,9 @@ def extract_entities():
         if not videos:
             continue
 
-        positive = sum(1 for item in videos.values() if item["direction"] == "positive")
+        adoption = sum(1 for item in videos.values() if item["direction"] == "adoption")
         negative = sum(1 for item in videos.values() if item["direction"] == "negative")
+        interest = sum(1 for item in videos.values() if item["direction"] == "interest")
         mixed = sum(1 for item in videos.values() if item["direction"] == "mixed")
         neutral = sum(1 for item in videos.values() if item["direction"] == "neutral")
 
@@ -170,8 +202,8 @@ def extract_entities():
 
         print(
             f"- {entity} | unique_videos={len(videos)} | "
-            f"positive={positive} | negative={negative} | "
-            f"mixed={mixed} | neutral={neutral} | "
+            f"adoption={adoption} | negative={negative} | "
+            f"interest={interest} | mixed={mixed} | neutral={neutral} | "
             f"context={', '.join(contexts) if contexts else 'none'}"
         )
 
