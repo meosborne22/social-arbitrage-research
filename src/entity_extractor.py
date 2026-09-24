@@ -1,186 +1,187 @@
 import os
 import re
-from collections import Counter, defaultdict
-from datetime import datetime, timezone, timedelta
-
+from collections import defaultdict
 from supabase import create_client
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
+
 supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
-# Known names from the evidence we have already observed.
-# This layer identifies entities; it deliberately does NOT force a stock
-# mapping when ownership/public-market exposure has not been verified.
-KNOWN_ENTITIES = {
-    "tarte": {"entity_type": "brand", "canonical_name": "Tarte"},
-    "tartecosmetics": {"entity_type": "brand", "canonical_name": "Tarte"},
-    "medicube": {"entity_type": "brand", "canonical_name": "Medicube"},
-    "plix": {"entity_type": "brand", "canonical_name": "Plix"},
-    "boldfit": {"entity_type": "brand", "canonical_name": "BOLDfit"},
-    "nestle": {"entity_type": "company_or_brand", "canonical_name": "Nestlé"},
-    "takis": {"entity_type": "brand", "canonical_name": "Takis"},
-    "frijj": {"entity_type": "brand", "canonical_name": "Frijj"},
-    "meesho": {"entity_type": "company_or_brand", "canonical_name": "Meesho"},
-}
+KNOWN_ENTITIES = [
+    "Tarte",
+    "Medicube",
+    "Plix",
+    "BOLDfit",
+    "Nestlé",
+    "Takis",
+    "Frijj",
+    "Meesho",
+]
 
-# Product/category terms worth preserving as context around an entity.
-PRODUCT_TERMS = {
+CONTEXT_TERMS = [
     "skincare", "makeup", "serum", "mascara", "cream", "shampoo",
-    "straps", "gadgets", "chocolate", "crisps", "milkshake", "kitchen",
-    "beauty", "fashion", "cleaning", "bundle", "holiday",
-}
+    "straps", "gadgets", "chocolate", "crisps", "milkshake",
+    "kitchen", "beauty", "fashion", "cleaning", "bundle", "holiday",
+]
 
-NEGATIVE_TERMS = {
-    "boycott", "avoid", "hate", "regret", "stopped", "stop", "never",
-    "don't buy", "do not buy", "bad", "scam", "problem", "problems",
-}
+# These terms indicate rejection, avoidance, dissatisfaction, or a boycott.
+NEGATIVE_PATTERNS = [
+    r"\bboycott\b",
+    r"\bavoid\b",
+    r"\bavoiding\b",
+    r"\bhate\b",
+    r"\bhated\b",
+    r"\bregret\b",
+    r"\bregretted\b",
+    r"\bstopped\b",
+    r"\bstop using\b",
+    r"\bstop buying\b",
+    r"\bnever buy\b",
+    r"\bdon't buy\b",
+    r"\bdo not buy\b",
+    r"\bnot buying\b",
+    r"\bwon't buy\b",
+    r"\bcomplaint\b",
+    r"\bcomplaints\b",
+    r"\bproblem\b",
+    r"\bproblems\b",
+    r"\bscam\b",
+    r"\bdisappointed\b",
+    r"\bdisappointing\b",
+]
 
-POSITIVE_TERMS = {
-    "buying", "bought", "buy", "love", "loves", "favorite", "obsessed",
-    "must buy", "must-have", "worth it", "made me buy", "everyone is buying",
-    "selling", "viral", "popular", "recommend", "recommendation",
-}
+# These terms count only when they describe actual consumer behavior,
+# demand, preference, recommendation, or adoption.
+POSITIVE_PATTERNS = [
+    r"\bbuying\b",
+    r"\bbought\b",
+    r"\bbuy\b",
+    r"\bpurchase\b",
+    r"\bpurchased\b",
+    r"\blove\b",
+    r"\bloved\b",
+    r"\bfavorite\b",
+    r"\bfavourite\b",
+    r"\bobsessed\b",
+    r"\bmust[- ]buy\b",
+    r"\bmust[- ]have\b",
+    r"\bmade me buy\b",
+    r"\beveryone is buying\b",
+    r"\bselling out\b",
+    r"\bsold out\b",
+    r"\bpopular\b",
+    r"\brecommend\b",
+    r"\brecommended\b",
+    r"\bworth it\b",
+    r"\bswitching to\b",
+    r"\bswitched to\b",
+    r"\busing\b",
+    r"\busers\b",
+    r"\bcustomers\b",
+]
 
-def clean_text(text):
-    return re.sub(r"\s+", " ", (text or "").lower()).strip()
+def matches_any(text, patterns):
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
-def video_id_from_observation(observation):
-    metadata = observation.get("raw_metadata") or {}
-    if metadata.get("video_id"):
-        return metadata["video_id"]
-    url = observation.get("source_url") or ""
-    match = re.search(r"[?&]v=([^&]+)", url)
-    return match.group(1) if match else url
+def classify_direction(title):
+    """
+    Direction rules:
+      positive = actual buying/adoption/preference/switching/demand evidence
+      negative = boycott/rejection/stopping/complaints/avoidance
+      neutral  = mention/display/review without behavior evidence
+      mixed    = genuinely contains both positive and negative evidence
+    """
+    text = title.lower()
+    negative = matches_any(text, NEGATIVE_PATTERNS)
+    positive = matches_any(text, POSITIVE_PATTERNS)
 
-def unique_observations(observations):
-    seen = {}
-    for observation in observations:
-        vid = video_id_from_observation(observation)
-        if vid not in seen:
-            seen[vid] = observation
-    return list(seen.values())
+    if positive and negative:
+        return "mixed"
+    if negative:
+        return "negative"
+    if positive:
+        return "positive"
+    return "neutral"
 
-def extract_entities(text):
-    normalized = clean_text(text)
-    found = []
-
-    for alias, info in KNOWN_ENTITIES.items():
-        if re.search(rf"\b{re.escape(alias)}\b", normalized):
-            found.append(info["canonical_name"])
-
-    return sorted(set(found))
-
-def extract_context(text):
-    normalized = clean_text(text)
-
-    products = [
-        term for term in PRODUCT_TERMS
-        if re.search(rf"\b{re.escape(term)}\b", normalized)
-    ]
-
-    positive_hits = [
-        term for term in POSITIVE_TERMS
-        if term in normalized
-    ]
-
-    negative_hits = [
-        term for term in NEGATIVE_TERMS
-        if term in normalized
-    ]
-
-    if negative_hits and not positive_hits:
-        direction = "negative"
-    elif positive_hits and not negative_hits:
-        direction = "positive"
-    elif positive_hits and negative_hits:
-        direction = "mixed"
-    else:
-        direction = "neutral"
-
-    return {
-        "products_or_categories": sorted(set(products)),
-        "positive_signals": sorted(set(positive_hits)),
-        "negative_signals": sorted(set(negative_hits)),
-        "direction": direction,
-    }
-
-def run_entity_extraction():
-    cutoff = datetime.now(timezone.utc) - timedelta(days=14)
-
+def extract_entities():
     response = (
         supabase.table("observations")
-        .select(
-            "observed_at,text_evidence,source,source_url,value,raw_metadata"
-        )
+        .select("text_evidence,value,raw_metadata")
         .eq("source", "youtube")
-        .gte("observed_at", cutoff.isoformat())
         .order("observed_at", desc=True)
         .limit(1000)
         .execute()
     )
 
-    observations = unique_observations(response.data or [])
+    # Entity -> video_id -> evidence record.
+    entity_videos = defaultdict(dict)
 
-    print(f"Analyzing {len(observations)} unique YouTube videos.")
+    for row in response.data or []:
+        title = row.get("text_evidence") or ""
+        metadata = row.get("raw_metadata") or {}
+        video_id = metadata.get("video_id")
 
-    entity_evidence = defaultdict(list)
+        if not video_id:
+            match = re.search(r"v=([^&\s]+)", metadata.get("video_url", ""))
+            video_id = match.group(1) if match else None
 
-    for observation in observations:
-        title = observation.get("text_evidence") or ""
-        entities = extract_entities(title)
-
-        if not entities:
+        if not video_id:
             continue
 
-        context = extract_context(title)
+        lower_title = title.lower()
 
-        for entity in entities:
-            entity_evidence[entity].append({
-                "video_id": video_id_from_observation(observation),
-                "title": title,
-                "views": observation.get("value"),
-                "observed_at": observation.get("observed_at"),
-                "source_url": observation.get("source_url"),
-                "direction": context["direction"],
-                "products_or_categories": context["products_or_categories"],
-                "positive_signals": context["positive_signals"],
-                "negative_signals": context["negative_signals"],
-            })
+        for entity in KNOWN_ENTITIES:
+            if entity.lower() not in lower_title:
+                continue
 
-    print("\nDetected entities:")
+            context = [
+                term for term in CONTEXT_TERMS
+                if term in lower_title
+            ]
 
-    for entity, evidence in sorted(
-        entity_evidence.items(),
-        key=lambda item: (-len(item[1]), item[0])
-    ):
-        unique_videos = len({x["video_id"] for x in evidence})
-        positive = sum(x["direction"] == "positive" for x in evidence)
-        negative = sum(x["direction"] == "negative" for x in evidence)
-        mixed = sum(x["direction"] == "mixed" for x in evidence)
+            entity_videos[entity].setdefault(
+                video_id,
+                {
+                    "title": title,
+                    "views": row.get("value") or 0,
+                    "direction": classify_direction(title),
+                    "context": context,
+                },
+            )
 
-        categories = Counter()
-        for item in evidence:
-            categories.update(item["products_or_categories"])
+    print("Detected entities:")
+
+    for entity in KNOWN_ENTITIES:
+        videos = entity_videos.get(entity, {})
+        if not videos:
+            continue
+
+        positive = sum(1 for item in videos.values() if item["direction"] == "positive")
+        negative = sum(1 for item in videos.values() if item["direction"] == "negative")
+        mixed = sum(1 for item in videos.values() if item["direction"] == "mixed")
+        neutral = sum(1 for item in videos.values() if item["direction"] == "neutral")
+
+        contexts = sorted({
+            term
+            for item in videos.values()
+            for term in item["context"]
+        })
 
         print(
-            f"- {entity} | unique_videos={unique_videos} | "
-            f"positive={positive} | negative={negative} | mixed={mixed} | "
-            f"context={', '.join(x for x, _ in categories.most_common(5)) or 'none'}"
+            f"- {entity} | unique_videos={len(videos)} | "
+            f"positive={positive} | negative={negative} | "
+            f"mixed={mixed} | neutral={neutral} | "
+            f"context={', '.join(contexts) if contexts else 'none'}"
         )
 
-        # Show the actual evidence so we can audit extraction before
-        # connecting entities to companies/stocks.
-        for item in evidence[:5]:
+        for item in list(videos.values())[:10]:
             print(
-                f"    {item['direction']} | {item['views']} views | "
+                f"    {item['direction']} | {item['views']:,} views | "
                 f"{item['title']}"
             )
 
-    print(
-        "\nEntity extraction complete. "
-        "No stock/company mapping was forced."
-    )
+    print("Entity extraction complete. No stock/company mapping was forced.")
 
 if __name__ == "__main__":
-    run_entity_extraction()
+    extract_entities()
