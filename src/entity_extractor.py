@@ -1,4 +1,3 @@
-```python
 import os
 import re
 from collections import defaultdict
@@ -154,5 +153,112 @@ def extract_entities():
 
     for row in response.data or []:
         title = row.get("text_evidence") or ""
-        metadata
-```
+        metadata = row.get("raw_metadata") or {}
+        observation_id = row.get("id")
+
+        direction = classify_direction(title)
+
+        if observation_id is not None:
+            observation_signals[observation_id] = direction
+
+        video_id = metadata.get("video_id")
+
+        if not video_id:
+            match = re.search(r"v=([^&\s]+)", metadata.get("video_url", ""))
+            video_id = match.group(1) if match else None
+
+        if not video_id:
+            continue
+
+        lower_title = title.lower()
+
+        for entity in KNOWN_ENTITIES:
+            if entity.lower() not in lower_title:
+                continue
+
+            context = [
+                term for term in CONTEXT_TERMS
+                if term in lower_title
+            ]
+
+            entity_videos[entity].setdefault(
+                video_id,
+                {
+                    "title": title,
+                    "views": row.get("value") or 0,
+                    "direction": direction,
+                    "context": context,
+                },
+            )
+
+    # Persist behavior classification for every processed YouTube observation.
+    updated = 0
+
+    for observation_id, direction in observation_signals.items():
+        try:
+            (
+                supabase.table("observations")
+                .update({"behavior_signal": direction})
+                .eq("id", observation_id)
+                .execute()
+            )
+            updated += 1
+        except Exception as error:
+            print(
+                f"Could not update behavior_signal for observation "
+                f"{observation_id}: {error}"
+            )
+
+    print(f"Persisted behavior signals for {updated} observations.")
+
+    print("Detected entities:")
+
+    for entity in KNOWN_ENTITIES:
+        videos = entity_videos.get(entity, {})
+        if not videos:
+            continue
+
+        adoption = sum(
+            1 for item in videos.values()
+            if item["direction"] == "adoption"
+        )
+        negative = sum(
+            1 for item in videos.values()
+            if item["direction"] == "negative"
+        )
+        interest = sum(
+            1 for item in videos.values()
+            if item["direction"] == "interest"
+        )
+        mixed = sum(
+            1 for item in videos.values()
+            if item["direction"] == "mixed"
+        )
+        neutral = sum(
+            1 for item in videos.values()
+            if item["direction"] == "neutral"
+        )
+
+        contexts = sorted({
+            term
+            for item in videos.values()
+            for term in item["context"]
+        })
+
+        print(
+            f"- {entity} | unique_videos={len(videos)} | "
+            f"adoption={adoption} | negative={negative} | "
+            f"interest={interest} | mixed={mixed} | neutral={neutral} | "
+            f"context={', '.join(contexts) if contexts else 'none'}"
+        )
+
+        for item in list(videos.values())[:10]:
+            print(
+                f"    {item['direction']} | {item['views']:,} views | "
+                f"{item['title']}"
+            )
+
+    print("Entity extraction complete. No stock/company mapping was forced.")
+
+if __name__ == "__main__":
+    extract_entities()
