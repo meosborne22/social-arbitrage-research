@@ -1,3 +1,4 @@
+```python
 import os
 import re
 from collections import defaultdict
@@ -138,7 +139,7 @@ def classify_direction(title):
 def extract_entities():
     response = (
         supabase.table("observations")
-        .select("text_evidence,value,raw_metadata")
+        .select("id,text_evidence,value,raw_metadata")
         .eq("source", "youtube")
         .order("observed_at", desc=True)
         .limit(1000)
@@ -148,72 +149,10 @@ def extract_entities():
     # Entity -> video_id -> evidence record.
     entity_videos = defaultdict(dict)
 
+    # Observation ID -> behavior classification.
+    observation_signals = {}
+
     for row in response.data or []:
         title = row.get("text_evidence") or ""
-        metadata = row.get("raw_metadata") or {}
-        video_id = metadata.get("video_id")
-
-        if not video_id:
-            match = re.search(r"v=([^&\s]+)", metadata.get("video_url", ""))
-            video_id = match.group(1) if match else None
-
-        if not video_id:
-            continue
-
-        lower_title = title.lower()
-
-        for entity in KNOWN_ENTITIES:
-            if entity.lower() not in lower_title:
-                continue
-
-            context = [
-                term for term in CONTEXT_TERMS
-                if term in lower_title
-            ]
-
-            entity_videos[entity].setdefault(
-                video_id,
-                {
-                    "title": title,
-                    "views": row.get("value") or 0,
-                    "direction": classify_direction(title),
-                    "context": context,
-                },
-            )
-
-    print("Detected entities:")
-
-    for entity in KNOWN_ENTITIES:
-        videos = entity_videos.get(entity, {})
-        if not videos:
-            continue
-
-        adoption = sum(1 for item in videos.values() if item["direction"] == "adoption")
-        negative = sum(1 for item in videos.values() if item["direction"] == "negative")
-        interest = sum(1 for item in videos.values() if item["direction"] == "interest")
-        mixed = sum(1 for item in videos.values() if item["direction"] == "mixed")
-        neutral = sum(1 for item in videos.values() if item["direction"] == "neutral")
-
-        contexts = sorted({
-            term
-            for item in videos.values()
-            for term in item["context"]
-        })
-
-        print(
-            f"- {entity} | unique_videos={len(videos)} | "
-            f"adoption={adoption} | negative={negative} | "
-            f"interest={interest} | mixed={mixed} | neutral={neutral} | "
-            f"context={', '.join(contexts) if contexts else 'none'}"
-        )
-
-        for item in list(videos.values())[:10]:
-            print(
-                f"    {item['direction']} | {item['views']:,} views | "
-                f"{item['title']}"
-            )
-
-    print("Entity extraction complete. No stock/company mapping was forced.")
-
-if __name__ == "__main__":
-    extract_entities()
+        metadata
+```
