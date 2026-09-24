@@ -23,6 +23,7 @@ STOP_WORDS = {
     "tips","under","useful","what","worth","amp","crude","poisoning","did",
     "mystery","luxury","outfit","skin",
 }
+
 PRIORITY_WORDS = {
     "amazon","amazonfinds","beauty","makeup","skincare","skincareroutine",
     "skincaretips","fashion","jewelry","kitchen","home","fitness","food",
@@ -31,6 +32,7 @@ PRIORITY_WORDS = {
     "milkshake","football","winter","tarte","cleaninghacks",
     "holidayshopping","tiktokmademebuy","amzonmustbuy",
 }
+
 PHRASE_SIGNALS = {
     "tiktok made me buy": "TikTok purchase influence",
     "made me buy it": "social purchase influence",
@@ -43,6 +45,33 @@ PHRASE_SIGNALS = {
     "amazon finds": "Amazon discovery",
     "amazon haul": "Amazon shopping behavior",
     "amazon gadgets": "Amazon gadget demand",
+}
+
+# Content-quality rules. These classify what the video is evidence OF.
+# They do not judge whether a trend is investable.
+CONTENT_RULES = {
+    "financial_news": [
+        "stock market", "stock update", "crude oil", "business news",
+        "market update", "share market", "financial news", "trading update",
+    ],
+    "research_media": [
+        "mckinsey", "consumer reports", "research", "industry report",
+        "consumer trends leaders", "trend report", "market trends",
+    ],
+    "direct_commerce": [
+        "amazon finds", "amazon haul", "must buy", "must-have", "must have",
+        "buying", "bought", "product review", "product reviews", "unboxing",
+        "shopping", "finds", "products under", "products everyone is buying",
+    ],
+    "influencer_adoption": [
+        "tiktok made me buy", "tiktok made me", "everyone is buying",
+        "went broke buying", "viral", "obsessed", "haul",
+    ],
+    "consumer_behavior": [
+        "made me buy", "can't live without", "switched to", "switching to",
+        "stopped using", "instead of", "everyone loves", "everyone's",
+        "favorite product", "daily routine", "routine", "what i use",
+    ],
 }
 
 def clean_text(text):
@@ -72,8 +101,32 @@ def unique_observations(observations):
             seen[vid] = observation
     return list(seen.values())
 
+def classify_content(title):
+    text = clean_text(title)
+    matched = []
+
+    for category, phrases in CONTENT_RULES.items():
+        if any(phrase in text for phrase in phrases):
+            matched.append(category)
+
+    # Strong exclusions take precedence.
+    if "financial_news" in matched:
+        return "financial_news"
+    if "research_media" in matched:
+        return "research_media"
+
+    if "consumer_behavior" in matched:
+        return "consumer_behavior"
+    if "influencer_adoption" in matched:
+        return "influencer_adoption"
+    if "direct_commerce" in matched:
+        return "direct_commerce"
+
+    return "other"
+
 def calculate_engagement_growth(observations):
     by_video = defaultdict(list)
+
     for observation in observations:
         vid = video_id_from_observation(observation)
         try:
@@ -87,8 +140,10 @@ def calculate_engagement_growth(observations):
         snapshots.sort(key=lambda x: x[0] or "")
         if len(snapshots) < 2:
             continue
+
         start = snapshots[0][1]
         latest = snapshots[-1][1]
+
         records.append({
             "video_id": vid,
             "observations": len(snapshots),
@@ -96,6 +151,7 @@ def calculate_engagement_growth(observations):
             "latest_views": latest,
             "growth_ratio": None if start <= 0 else latest / start,
         })
+
     return records
 
 def upsert_trend(name, related_observations):
@@ -104,111 +160,208 @@ def upsert_trend(name, related_observations):
     )
     first_seen = min(x["observed_at"] for x in related_observations)
     payload = {"status": "active", "first_detected_at": first_seen}
+
     if existing.data:
-        supabase.table("trends").update(payload).eq("id", existing.data[0]["id"]).execute()
+        supabase.table("trends").update(payload).eq(
+            "id", existing.data[0]["id"]
+        ).execute()
     else:
         supabase.table("trends").insert({
-            "name": name, "first_detected_at": first_seen, "status": "active"
+            "name": name,
+            "first_detected_at": first_seen,
+            "status": "active",
         }).execute()
 
 def detect_trends():
     cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+
     response = (
         supabase.table("observations")
-        .select("observed_at,text_evidence,source,source_url,value,raw_metadata")
+        .select(
+            "observed_at,text_evidence,source,source_url,value,raw_metadata"
+        )
         .eq("source", "youtube")
         .gte("observed_at", cutoff.isoformat())
         .order("observed_at", desc=True)
-        .limit(1000).execute()
+        .limit(1000)
+        .execute()
     )
+
     observations = response.data or []
     print(f"Found {len(observations)} recent YouTube observations.")
+
     if not observations:
         print("No observations available yet.")
         return
 
     volume_observations = unique_observations(observations)
-    print(f"Using {len(volume_observations)} unique YouTube videos for trend-volume calculations.")
+
+    print(
+        f"Using {len(volume_observations)} unique YouTube videos "
+        f"for trend-volume calculations."
+    )
+
+    # Classify unique videos so research/news content cannot inflate
+    # direct consumer-behavior volume.
+    content_counts = Counter()
+    classified_videos = []
+
+    for observation in volume_observations:
+        category = classify_content(observation.get("text_evidence") or "")
+        content_counts[category] += 1
+        classified_videos.append((observation, category))
+
+    print("\nContent-quality classification:")
+    for category, count in content_counts.most_common():
+        print(f"- {category}: {count}")
+
+    # Only these categories are allowed to contribute to consumer-volume
+    # trend detection. Research/media remains useful context but does not
+    # count as direct consumer evidence.
+    consumer_volume_observations = [
+        observation
+        for observation, category in classified_videos
+        if category in {
+            "consumer_behavior",
+            "influencer_adoption",
+            "direct_commerce",
+        }
+    ]
+
+    print(
+        f"Using {len(consumer_volume_observations)} videos as "
+        f"consumer/commerce evidence."
+    )
 
     growth = calculate_engagement_growth(observations)
     repeated = [x for x in growth if x["observations"] >= 2]
+
     print(f"Found {len(repeated)} videos with repeated engagement snapshots.")
-    for item in sorted(
-        repeated,
-        key=lambda x: x["growth_ratio"] if x["growth_ratio"] is not None else -1,
-        reverse=True
-    )[:10]:
-        ratio = "not calculable" if item["growth_ratio"] is None else f"{item['growth_ratio']:.2f}x"
-        print(
-            f"- video={item['video_id']} | snapshots={item['observations']} | "
-            f"views={item['starting_views']:,}->{item['latest_views']:,} | growth={ratio}"
-        )
+
+    if repeated:
+        print("\nStrongest observed engagement growth:")
+        for item in sorted(
+            repeated,
+            key=lambda x: (
+                x["growth_ratio"] if x["growth_ratio"] is not None else -1
+            ),
+            reverse=True,
+        )[:10]:
+            ratio = (
+                "not calculable"
+                if item["growth_ratio"] is None
+                else f"{item['growth_ratio']:.2f}x"
+            )
+            print(
+                f"- video={item['video_id']} | "
+                f"snapshots={item['observations']} | "
+                f"views={item['starting_views']:,}->"
+                f"{item['latest_views']:,} | growth={ratio}"
+            )
 
     daily_counts = defaultdict(Counter)
     keyword_observations = defaultdict(list)
     phrase_counts = Counter()
     phrase_observations = defaultdict(list)
 
-    for observation in volume_observations:
+    for observation in consumer_volume_observations:
         title = observation.get("text_evidence") or ""
         day = observation["observed_at"][:10]
+
         for keyword in set(extract_keywords(title)):
             daily_counts[keyword][day] += 1
             keyword_observations[keyword].append(observation)
+
         for phrase in extract_phrases(title):
             phrase_counts[phrase] += 1
             phrase_observations[phrase].append(observation)
 
     selected = []
+
     for keyword in PRIORITY_WORDS:
         counts = daily_counts.get(keyword, Counter())
         total = sum(counts.values())
+
         if total >= 2:
             selected.append({
-                "name": f"YouTube: {keyword}", "kind": "category",
-                "total": total, "related": keyword_observations[keyword]
+                "name": f"YouTube: {keyword}",
+                "kind": "category",
+                "total": total,
+                "related": keyword_observations[keyword],
             })
 
     for phrase, total in phrase_counts.items():
         if total >= 2:
             selected.append({
                 "name": f"YouTube behavior: {PHRASE_SIGNALS[phrase]}",
-                "kind": "behavior", "total": total,
-                "related": phrase_observations[phrase]
+                "kind": "behavior",
+                "total": total,
+                "related": phrase_observations[phrase],
             })
 
     for keyword, counts in daily_counts.items():
         if keyword in PRIORITY_WORDS:
             continue
+
         total = sum(counts.values())
         days = sorted(counts.keys())
+
         if total < 4 or len(days) < 3:
             continue
+
         recent_days = days[-3:]
         older_days = days[:-3]
         recent_total = sum(counts[d] for d in recent_days)
         older_total = sum(counts[d] for d in older_days)
+
         if older_total <= 0:
             continue
-        growth_ratio = (recent_total / len(recent_days)) / (older_total / len(older_days))
+
+        growth_ratio = (
+            (recent_total / len(recent_days))
+            / (older_total / len(older_days))
+        )
+
         if growth_ratio >= 1.75 and recent_total >= 4:
             selected.append({
-                "name": f"YouTube emerging: {keyword}", "kind": "accelerating",
-                "total": total, "related": keyword_observations[keyword],
-                "growth_ratio": growth_ratio
+                "name": f"YouTube emerging: {keyword}",
+                "kind": "accelerating",
+                "total": total,
+                "related": keyword_observations[keyword],
+                "growth_ratio": growth_ratio,
             })
 
-    existing = supabase.table("trends").select("id,name").like("name", "YouTube%").execute()
+    existing = (
+        supabase.table("trends")
+        .select("id,name")
+        .like("name", "YouTube%")
+        .execute()
+    )
+
     for trend in existing.data or []:
-        supabase.table("trends").update({"status": "inactive"}).eq("id", trend["id"]).execute()
+        supabase.table("trends").update(
+            {"status": "inactive"}
+        ).eq("id", trend["id"]).execute()
 
     unique = {item["name"]: item for item in selected}
+
     print("\nSelected consumer signals:")
-    for item in sorted(unique.values(), key=lambda x: (x["kind"], -x["total"], x["name"]))[:40]:
-        print(f"- {item['name']} | type={item['kind']} | unique_videos={item['total']}")
+
+    for item in sorted(
+        unique.values(),
+        key=lambda x: (x["kind"], -x["total"], x["name"])
+    )[:40]:
+        print(
+            f"- {item['name']} | "
+            f"type={item['kind']} | "
+            f"consumer_videos={item['total']}"
+        )
         upsert_trend(item["name"], item["related"])
 
-    print(f"\nTrend detection complete. Activated {min(len(unique), 40)} consumer signals.")
+    print(
+        f"\nTrend detection complete. "
+        f"Activated {min(len(unique), 40)} consumer signals."
+    )
 
 if __name__ == "__main__":
     detect_trends()
