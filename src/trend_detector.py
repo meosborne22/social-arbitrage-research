@@ -9,6 +9,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
+# Words that are too generic to represent a useful consumer trend.
 STOP_WORDS = {
     "the","and","for","with","this","that","from","your","you","are","was",
     "were","have","has","just","about","into","their","they","them","product",
@@ -21,7 +22,17 @@ STOP_WORDS = {
     "unsolved","flawless","holiday","comment","everything","fall","life",
     "link","love","needs","obsessed","penny","quot","single","stop","store",
     "tips","under","useful","what","worth","amp","crude","poisoning","did",
-    "mystery","luxury","outfit","skin",
+    "mystery","luxury","outfit","skin","these","those","here","there","just",
+    "review","reviews","shop","shopping","must","need","needs","going","thing",
+    "things","viralproducts","find","found","actually","really","right",
+    "today","watch","watching","look","looks","looked","way","ways","time",
+    "times","people","someone","something","anything","stuff","stuffing",
+}
+
+# Generic words are allowed only when paired with a stronger phrase/category.
+WEAK_KEYWORDS = {
+    "shop","shopping","review","reviews","these","those","decor","find",
+    "found","gadgets","viralproducts","viral","mustbuy","must",
 }
 
 PRIORITY_WORDS = {
@@ -47,8 +58,6 @@ PHRASE_SIGNALS = {
     "amazon gadgets": "Amazon gadget demand",
 }
 
-# Content-quality rules. These classify what the video is evidence OF.
-# They do not judge whether a trend is investable.
 CONTENT_RULES = {
     "financial_news": [
         "stock market", "stock update", "crude oil", "business news",
@@ -79,11 +88,14 @@ def clean_text(text):
 
 def extract_keywords(text):
     words = re.findall(r"[a-zA-Z][a-zA-Z0-9'-]{2,}", clean_text(text))
-    return [w for w in words if w not in STOP_WORDS]
+    return [
+        word for word in words
+        if word not in STOP_WORDS and len(word) >= 4
+    ]
 
 def extract_phrases(text):
     normalized = clean_text(text)
-    return [p for p in PHRASE_SIGNALS if p in normalized]
+    return [phrase for phrase in PHRASE_SIGNALS if phrase in normalized]
 
 def video_id_from_observation(observation):
     metadata = observation.get("raw_metadata") or {}
@@ -109,12 +121,10 @@ def classify_content(title):
         if any(phrase in text for phrase in phrases):
             matched.append(category)
 
-    # Strong exclusions take precedence.
     if "financial_news" in matched:
         return "financial_news"
     if "research_media" in matched:
         return "research_media"
-
     if "consumer_behavior" in matched:
         return "consumer_behavior"
     if "influencer_adoption" in matched:
@@ -195,14 +205,11 @@ def detect_trends():
         return
 
     volume_observations = unique_observations(observations)
-
     print(
         f"Using {len(volume_observations)} unique YouTube videos "
         f"for trend-volume calculations."
     )
 
-    # Classify unique videos so research/news content cannot inflate
-    # direct consumer-behavior volume.
     content_counts = Counter()
     classified_videos = []
 
@@ -215,9 +222,6 @@ def detect_trends():
     for category, count in content_counts.most_common():
         print(f"- {category}: {count}")
 
-    # Only these categories are allowed to contribute to consumer-volume
-    # trend detection. Research/media remains useful context but does not
-    # count as direct consumer evidence.
     consumer_volume_observations = [
         observation
         for observation, category in classified_videos
@@ -278,6 +282,8 @@ def detect_trends():
 
     selected = []
 
+    # Priority categories are retained because they represent concrete
+    # consumer/product domains rather than generic verbs.
     for keyword in PRIORITY_WORDS:
         counts = daily_counts.get(keyword, Counter())
         total = sum(counts.values())
@@ -299,8 +305,10 @@ def detect_trends():
                 "related": phrase_observations[phrase],
             })
 
+    # Emerging keywords must be specific enough to be useful.
+    # Weak generic terms are excluded unless they are priority categories.
     for keyword, counts in daily_counts.items():
-        if keyword in PRIORITY_WORDS:
+        if keyword in PRIORITY_WORDS or keyword in WEAK_KEYWORDS:
             continue
 
         total = sum(counts.values())
