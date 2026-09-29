@@ -44,15 +44,17 @@ def headers(api_key):
     }
 
 
-def existing_video_ids(supabase_url, api_key, video_ids):
-    found = set()
+def latest_video_observations(supabase_url, api_key, video_ids):
+    """Return the latest stored observation timestamp for each video ID."""
+    latest = {}
     url = f"{supabase_url.rstrip('/')}/rest/v1/observations"
     for start in range(0, len(video_ids), 100):
         batch = video_ids[start:start + 100]
         params = {
-            "select": "raw_metadata",
+            "select": "observed_at,raw_metadata",
             "source": "eq.youtube",
             "raw_metadata->>video_id": f"in.({','.join(batch)})",
+            "order": "observed_at.desc",
             "limit": "1000",
         }
         response = requests.get(
@@ -60,13 +62,14 @@ def existing_video_ids(supabase_url, api_key, video_ids):
         )
         if not response.ok:
             raise RuntimeError(
-                f"Supabase duplicate-check failed ({response.status_code}): {response.text[:1000]}"
+                f"Supabase snapshot-check failed ({response.status_code}): {response.text[:1000]}"
             )
         for row in response.json():
             video_id = (row.get("raw_metadata") or {}).get("video_id")
-            if video_id:
-                found.add(video_id)
-    return found
+            observed_at = row.get("observed_at")
+            if video_id and observed_at and video_id not in latest:
+                latest[video_id] = observed_at
+    return latest
 
 
 def get_video_details(api_key, video_ids):
@@ -125,17 +128,33 @@ def main():
         print("No videos found; nothing to insert.")
         return
 
-    existing = existing_video_ids(supabase_url, supabase_key, ids)
-    new_ids = [video_id for video_id in ids if video_id not in existing]
-    print(f"{len(existing)} already exist; {len(new_ids)} new videos to evaluate.")
-    if not new_ids:
-        print("No new videos to insert.")
+    latest = latest_video_observations(supabase_url, supabase_key, ids)
+    now_dt = datetime.now(timezone.utc)
+    refresh_after = timedelta(hours=20)
+
+    # Insert a new snapshot for new videos, or refresh an existing video
+    # only when its last snapshot is at least 20 hours old.
+    ids_to_snapshot = []
+    for video_id in ids:
+        previous = latest.get(video_id)
+        if not previous:
+            ids_to_snapshot.append(video_id)
+            continue
+        previous_dt = datetime.fromisoformat(previous.replace("Z", "+00:00"))
+        if now_dt - previous_dt >= refresh_after:
+            ids_to_snapshot.append(video_id)
+
+    new_count = sum(1 for video_id in ids_to_snapshot if video_id not in latest)
+    refresh_count = len(ids_to_snapshot) - new_count
+    print(f"{len(latest)} already exist; {new_count} new videos; {refresh_count} due for a fresh snapshot.")
+    if not ids_to_snapshot:
+        print("No videos are due for a snapshot yet.")
         return
 
-    details = get_video_details(youtube_api_key, new_ids)
+    details = get_video_details(youtube_api_key, ids_to_snapshot)
     now = datetime.now(timezone.utc).isoformat()
     rows = []
-    for video_id in new_ids:
+    for video_id in ids_to_snapshot:
         candidate = candidates[video_id]
         detail = details.get(video_id, {})
         snippet = detail.get("snippet") or {}
@@ -161,7 +180,7 @@ def main():
                 "like_count": likes,
                 "comment_count": comments,
                 "search_queries": candidate["search_queries"],
-                "collector": "youtube_collector_v2",
+                "collector": "youtube_collector_v3",
             },
         })
 
@@ -173,9 +192,10 @@ def main():
         raise RuntimeError(
             f"Supabase insert failed ({response.status_code}): {response.text[:2000]}"
         )
-    print(f"Inserted {len(rows)} new YouTube video observations.")
+    print(f"Inserted {len(rows)} YouTube snapshots ({new_count} new videos, {refresh_count} refreshed).")
     print("Search settings: regionCode=US, relevanceLanguage=en, rolling 30-day window.")
     print("Reminder: these settings bias results; they do not guarantee U.S. creators or viewers.")
+    print("Snapshots are repeated measurements of the same videos, not independent evidence.")
     print("Reminder: titles and views are discovery clues, not verified sales.")
 
 
