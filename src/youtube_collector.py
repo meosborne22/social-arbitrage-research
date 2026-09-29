@@ -1,150 +1,183 @@
 import os
-from datetime import datetime, timezone
+import sys
+import requests
+from datetime import datetime, timezone, timedelta
 
-from googleapiclient.discovery import build
-from supabase import create_client
-
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
-YOUTUBE_API_KEY = os.environ["YOUTUBE_API_KEY"]
-
-supabase = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
-
-youtube = build(
-    "youtube",
-    "v3",
-    developerKey=YOUTUBE_API_KEY,
-)
-
-SEARCH_TERMS = [
-    "viral products",
-    "new consumer trends",
+YOUTUBE_API_URL = "https://www.googleapis.com/youtube/v3"
+SEARCH_QUERIES = [
     "TikTok made me buy it",
-    "products everyone is buying",
-    "Amazon finds",
+    "everyone is buying this product",
+    "sold out everywhere product",
+    "products selling out",
+    "I switched from to product",
+    "holy grail product worth it",
+    "new product everyone loves",
+    "Amazon finds viral product",
 ]
+MAX_RESULTS_PER_QUERY = 10
 
 
-def collect_youtube_results():
-    collected_at = datetime.now(timezone.utc).isoformat()
-    total_saved = 0
-    total_skipped = 0
+def required_env(name):
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing required GitHub Actions secret/environment variable: {name}")
+    return value
 
-    for term in SEARCH_TERMS:
-        print(f"Searching YouTube for: {term}")
 
-        response = youtube.search().list(
-            part="snippet",
-            q=term,
-            type="video",
-            order="date",
-            maxResults=10,
-            regionCode="US",
-            relevanceLanguage="en",
-        ).execute()
+def youtube_get(endpoint, params):
+    response = requests.get(
+        f"{YOUTUBE_API_URL}/{endpoint}", params=params, timeout=30
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"YouTube API request failed ({response.status_code}): {response.text[:1000]}"
+        )
+    return response.json()
 
-        video_ids = []
 
-        for item in response.get("items", []):
-            video_id = item.get("id", {}).get("videoId")
-            if video_id:
-                video_ids.append(video_id)
+def headers(api_key):
+    return {
+        "apikey": api_key,
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
 
-        if not video_ids:
-            continue
 
-        stats_response = youtube.videos().list(
-            part="snippet,statistics",
-            id=",".join(video_ids),
-        ).execute()
-
-        stats_by_id = {
-            item["id"]: item
-            for item in stats_response.get("items", [])
+def existing_video_ids(supabase_url, api_key, video_ids):
+    found = set()
+    url = f"{supabase_url.rstrip('/')}/rest/v1/observations"
+    for start in range(0, len(video_ids), 100):
+        batch = video_ids[start:start + 100]
+        params = {
+            "select": "raw_metadata",
+            "source": "eq.youtube",
+            "raw_metadata->>video_id": f"in.({','.join(batch)})",
+            "limit": "1000",
         }
+        response = requests.get(
+            url, headers=headers(api_key), params=params, timeout=30
+        )
+        if not response.ok:
+            raise RuntimeError(
+                f"Supabase duplicate-check failed ({response.status_code}): {response.text[:1000]}"
+            )
+        for row in response.json():
+            video_id = (row.get("raw_metadata") or {}).get("video_id")
+            if video_id:
+                found.add(video_id)
+    return found
 
-        for item in response.get("items", []):
-            video_id = item.get("id", {}).get("videoId")
+
+def get_video_details(api_key, video_ids):
+    details = {}
+    for start in range(0, len(video_ids), 50):
+        batch = video_ids[start:start + 50]
+        data = youtube_get("videos", {
+            "part": "snippet,statistics",
+            "id": ",".join(batch),
+            "key": api_key,
+        })
+        for item in data.get("items", []):
+            details[item["id"]] = item
+    return details
+
+
+def main():
+    youtube_api_key = required_env("YOUTUBE_API_KEY")
+    supabase_url = required_env("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_KEY")
+    if not supabase_key:
+        raise RuntimeError("Missing SUPABASE_SECRET_KEY (or SUPABASE_KEY).")
+
+    candidates = {}
+    for query in SEARCH_QUERIES:
+        print(f"Searching YouTube for: {query}")
+        data = youtube_get("search", {
+            "part": "snippet",
+            "q": query,
+            "type": "video",
+            "maxResults": MAX_RESULTS_PER_QUERY,
+            "order": "date",
+            "publishedAfter": (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "key": youtube_api_key,
+        })
+        for item in data.get("items", []):
+            video_id = (item.get("id") or {}).get("videoId")
             if not video_id:
                 continue
-
-            # Prevent duplicate observations for the same YouTube video.
-            existing = (
-                supabase.table("observations")
-                .select("id")
-                .eq("source", "youtube")
-                .eq(
-                    "source_url",
-                    f"https://www.youtube.com/watch?v={video_id}",
-                )
-                .limit(1)
-                .execute()
-            )
-
-            if existing.data:
-                total_skipped += 1
-                print(f"Skipped existing video: {video_id}")
-                continue
-
-            snippet = item.get("snippet", {})
-            video_data = stats_by_id.get(video_id, {})
-            statistics = video_data.get("statistics", {})
-
-            view_count = int(statistics.get("viewCount", 0))
-            like_count = int(statistics.get("likeCount", 0))
-            comment_count = int(statistics.get("commentCount", 0))
-
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-
-            observation = {
-                "observed_at": collected_at,
-                "source": "youtube",
-                "source_url": video_url,
-                "entity": snippet.get("channelTitle"),
-                "observation_type": "youtube_video",
-                "metric": "video_engagement",
-                "value": view_count,
-                "text_evidence": snippet.get("title", ""),
-                "reliability": 0.80,
-                "raw_metadata": {
-                    "video_id": video_id,
-                    "search_term": term,
-                    "channel_title": snippet.get("channelTitle"),
-                    "channel_id": snippet.get("channelId"),
-                    "published_at": snippet.get("publishedAt"),
-                    "description": snippet.get("description"),
-                    "view_count": view_count,
-                    "like_count": like_count,
-                    "comment_count": comment_count,
-                    "video_url": video_url,
-                },
+            snippet = item.get("snippet") or {}
+            previous = candidates.get(video_id, {})
+            candidates[video_id] = {
+                "video_id": video_id,
+                "title": snippet.get("title", ""),
+                "channel_title": snippet.get("channelTitle", ""),
+                "published_at": snippet.get("publishedAt"),
+                "description": snippet.get("description", ""),
+                "search_queries": sorted(set(previous.get("search_queries", []) + [query])),
             }
 
-            try:
-                supabase.table("observations").insert(
-                    observation
-                ).execute()
+    ids = list(candidates)
+    print(f"Found {len(ids)} unique candidate videos across {len(SEARCH_QUERIES)} searches.")
+    if not ids:
+        print("No videos found; nothing to insert.")
+        return
 
-                total_saved += 1
+    existing = existing_video_ids(supabase_url, supabase_key, ids)
+    new_ids = [video_id for video_id in ids if video_id not in existing]
+    print(f"{len(existing)} already exist; {len(new_ids)} new videos to evaluate.")
+    if not new_ids:
+        print("No new videos to insert.")
+        return
 
-                print(
-                    f"Saved: {snippet.get('title', '')} | "
-                    f"Views: {view_count:,} | "
-                    f"Likes: {like_count:,} | "
-                    f"Comments: {comment_count:,}"
-                )
+    details = get_video_details(youtube_api_key, new_ids)
+    now = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for video_id in new_ids:
+        candidate = candidates[video_id]
+        detail = details.get(video_id, {})
+        snippet = detail.get("snippet") or {}
+        stats = detail.get("statistics") or {}
+        views = int(stats.get("viewCount", 0))
+        likes = int(stats["likeCount"]) if "likeCount" in stats else None
+        comments = int(stats["commentCount"]) if "commentCount" in stats else None
+        rows.append({
+            "observed_at": now,
+            "source": "youtube",
+            "source_url": f"https://www.youtube.com/watch?v={video_id}",
+            "entity": snippet.get("channelTitle") or candidate["channel_title"] or "YouTube",
+            "observation_type": "video",
+            "metric": "views",
+            "value": views,
+            "text_evidence": snippet.get("title") or candidate["title"],
+            "reliability": 0.5,
+            "raw_metadata": {
+                "video_id": video_id,
+                "channel_title": snippet.get("channelTitle") or candidate["channel_title"],
+                "published_at": snippet.get("publishedAt") or candidate["published_at"],
+                "description": snippet.get("description") or candidate["description"],
+                "like_count": likes,
+                "comment_count": comments,
+                "search_queries": candidate["search_queries"],
+                "collector": "youtube_collector_v2",
+            },
+        })
 
-            except Exception as error:
-                print(
-                    f"Could not save video {video_id}: {error}"
-                )
-
-    print(
-        f"YouTube collection complete. "
-        f"Saved {total_saved} new observations; "
-        f"skipped {total_skipped} duplicates."
+    url = f"{supabase_url.rstrip('/')}/rest/v1/observations"
+    response = requests.post(
+        url, headers=headers(supabase_key), json=rows, timeout=30
     )
+    if not response.ok:
+        raise RuntimeError(
+            f"Supabase insert failed ({response.status_code}): {response.text[:2000]}"
+        )
+    print(f"Inserted {len(rows)} new YouTube video observations.")
+    print("Reminder: titles and views are discovery clues, not verified sales.")
 
 
 if __name__ == "__main__":
-    collect_youtube_results()
+    try:
+        main()
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
