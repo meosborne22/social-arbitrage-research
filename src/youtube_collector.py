@@ -99,6 +99,8 @@ def main():
             "type": "video",
             "maxResults": MAX_RESULTS_PER_QUERY,
             "order": "date",
+            "regionCode": "US",
+            "relevanceLanguage": "en",
             "publishedAfter": (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "key": youtube_api_key,
         })
@@ -172,6 +174,8 @@ def main():
             f"Supabase insert failed ({response.status_code}): {response.text[:2000]}"
         )
     print(f"Inserted {len(rows)} new YouTube video observations.")
+    print("Search settings: regionCode=US, relevanceLanguage=en, rolling 30-day window.")
+    print("Reminder: these settings bias results; they do not guarantee U.S. creators or viewers.")
     print("Reminder: titles and views are discovery clues, not verified sales.")
 
 
